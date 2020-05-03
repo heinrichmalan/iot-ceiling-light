@@ -1,9 +1,12 @@
-use chrono::prelude::*;
-use redis;
-use redis::Commands;
-use rust_pigpio;
 
 use std::{env, thread, time, cmp};
+
+use chrono::prelude::*;
+use rust_pigpio;
+use rumqtt::{MqttClient, MqttOptions, QoS, Receiver};
+use rumqtt::mqttoptions::SecurityOptions;
+use rumqtt::client::Notification;
+
 
 const PWM_PIN: u32= 18;
 const PWM_FREQ: u32= 2000;
@@ -60,6 +63,69 @@ struct Schedule {
     running: bool
 }
 
+struct MqttHandler {
+    mqtt_client: MqttClient,
+    notifications: Receiver<Notification>
+}
+
+impl MqttHandler {
+    fn new() -> Self {
+        let mut mqtt_options = MqttOptions::new("test-pubsub1", "192.168.0.240", 1883);
+        let sec_opts = SecurityOptions::UsernamePassword(String::from("mqttuser"), String::from("Kawaiinekodesuy0"));
+        mqtt_options = mqtt_options.set_security_opts(sec_opts);
+        let (mqtt_client, notifications) = MqttClient::start(mqtt_options).unwrap();
+        Self {
+            mqtt_client,
+            notifications
+        }
+    }
+
+    fn check_notifications_for_topic(&self, to_match: &str) -> Option<String> {
+        let msg = self.notifications.try_recv();
+
+        match msg {
+            Ok(n) => {
+                match n {
+                    Notification::Publish(pl) => {
+                        let topic: String = String::from(&pl.topic_name);
+                        let message: String = String::from(std::str::from_utf8(&pl.payload).unwrap());
+                        println!("topic: {:?} - msg: {:?}", &topic, &message);
+                        println!("To match: {}", to_match);
+                        if topic.as_str() == to_match {
+                            return Some(message);
+                        } else {
+                            return None
+                        }
+                    },
+                    _ => {
+                        return None
+                    }
+                }
+            },
+            _ => {
+                return None
+            }
+        }
+    }
+
+    
+    fn get_status(&self) -> Option<String> {
+        self.check_notifications_for_topic("bedroom/light/switch")
+    }
+    
+    fn set_status(&mut self, status: &str) {
+        self.mqtt_client.publish("bedroom/light/status", QoS::ExactlyOnce, false, status).unwrap();
+    }
+    
+    fn get_brightness(&self) -> Option<String> {
+        self.check_notifications_for_topic("bedroom/light/brightness/set")
+    }
+    
+    fn set_brightness(&mut self, brightness: u32) {
+        self.mqtt_client.publish("bedroom/light/brightness", QoS::ExactlyOnce, false, brightness.to_string().as_bytes()).unwrap();
+    }
+}
+
 impl Schedule {
     fn new(hour: u32, minute: u32, duration: u32) -> Self {
         Self {
@@ -91,24 +157,6 @@ impl Schedule {
 
 }
 
-fn get_status(con: &mut redis::Connection) -> String {
-    let status: String = con.get("status").expect("Status should have been set");
-    status
-}
-
-fn set_status(con: &mut redis::Connection, status: &str) {
-    let _ : () = con.set("status", status).expect("Failed to set status");
-}
-
-fn get_brightness(con: &mut redis::Connection) -> u32 {
-    let brightness: u32 = con.get("brightness").expect("Brightness should have been set");
-    brightness
-}
-
-fn set_brightness(con: &mut redis::Connection, brightness: u32) {
-    let _ : () = con.set("brightness", brightness).expect("Failed to set brightness");
-}
-
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -127,23 +175,23 @@ fn main() {
     rust_pigpio::initialize().expect("Should be able to initialize GPIO");
     let mut bulb = Bulb::new();
 
-    println!("Connecting to redis at {}", redis_host);
-    let client = redis::Client::open(redis_host).expect("Could not open client");
-    let mut con = client.get_connection().expect("Could not get connection");
+    println!("Connecting to mqtt at {}", redis_host);
+    let mut mqtt_handler = MqttHandler::new();
     
-    println!("Checking for data in redis");
-    let mut target_brightness: u32 = con.get("brightness").unwrap_or(MAX_BRIGHTNESS);
-    set_brightness(&mut con, target_brightness);
+    println!("Checking for data in mqtt");
+    let target_brightness: String = mqtt_handler.get_brightness().unwrap_or(MAX_BRIGHTNESS.to_string());
+    let mut target_brightness: u32 = target_brightness.parse().expect("Should be an integer");
+    mqtt_handler.set_brightness(target_brightness);
     
-    let mut status: String = con.get("status").unwrap_or(String::from("1")); 
-    set_status(&mut con, &status);
+    let mut status: String = mqtt_handler.get_brightness().unwrap_or(String::from("1"));
+    mqtt_handler.set_status(&status);
     bulb.current_status = String::clone(&status);
     
     let mut schedule = Schedule::new(6, 30, 30);
 
     loop {
         // println!("Status: {}, Brightness: {}", &status, target_brightness);
-        status = get_status(&mut con);
+        status = mqtt_handler.get_status().unwrap_or(String::from("0"));
 
         if status != bulb.current_status {
             bulb.current_status = String::clone(&status);
@@ -159,24 +207,24 @@ fn main() {
             if bulb.current_status == "0" && !schedule.running {
                 schedule.running = true;
                 bulb.current_status = String::from("1");
-                set_status(&mut con, STATUS_ON);
-                set_brightness(&mut con, 0);
+                mqtt_handler.set_status(STATUS_ON);
+                mqtt_handler.set_brightness(0);
                 bulb.turn_off_bulb();
             } else if status == "0" && schedule.running {
                 bulb.current_status = String::from("0");
-                set_status(&mut con, STATUS_OFF);
+                mqtt_handler.set_status(STATUS_OFF);
                 bulb.turn_off_bulb();
                 schedule.running = false;
             }
 
             if bulb.current_status == "1" && schedule.running {
-                set_brightness(&mut con, cmp::min(MAX_BRIGHTNESS, schedule.calc_brightness()));
+                mqtt_handler.set_brightness(cmp::min(MAX_BRIGHTNESS, schedule.calc_brightness()));
             }
         } else if schedule.running {
             schedule.running = false;
         }
 
-        target_brightness = get_brightness(&mut con);
+        target_brightness = mqtt_handler.get_brightness().unwrap_or(String::from("0")).parse().expect("Should be an integer");
 
         if bulb.current_brightness != target_brightness {
             if bulb.current_status != "0"{

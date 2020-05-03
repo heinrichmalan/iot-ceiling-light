@@ -13,3 +13,4 @@ codegen-units = 1
 chrono = "0.4.11"
 rust-pigpio = "0.2.0"
 redis = "0.15.1"
+rumqtt = "0.31.0"
