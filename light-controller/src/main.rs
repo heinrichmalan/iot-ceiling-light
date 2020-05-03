@@ -74,6 +74,7 @@ impl MqttHandler {
         let sec_opts = SecurityOptions::UsernamePassword(String::from("mqttuser"), String::from("Kawaiinekodesuy0"));
         mqtt_options = mqtt_options.set_security_opts(sec_opts);
         let (mqtt_client, notifications) = MqttClient::start(mqtt_options).unwrap();
+        mqtt_client.subscribe("bedroom/light/#", QoS::AtLeastOnce).unwrap();
         Self {
             mqtt_client,
             notifications
