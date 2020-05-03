@@ -3,7 +3,7 @@ use redis;
 use redis::Commands;
 use rust_pigpio;
 
-use std::{thread, time, cmp};
+use std::{env, thread, time, cmp};
 
 const PWM_PIN: u32= 18;
 const PWM_FREQ: u32= 2000;
@@ -32,9 +32,9 @@ impl Bulb {
         let brightness_increase_allowed = (pct_increase_allowed * (MAX_BRIGHTNESS as f64)) as u32;
         let mut brightness = target_brightness;
         if target_brightness > current_brightness {
-            brightness = cmp::min((current_brightness + brightness_increase_allowed), target_brightness);
+            brightness = cmp::min(current_brightness + brightness_increase_allowed, target_brightness);
         } else if target_brightness < current_brightness {
-            brightness = cmp::max((current_brightness - brightness_increase_allowed), target_brightness);
+            brightness = cmp::max(current_brightness - brightness_increase_allowed, target_brightness);
         }
 
         if brightness < MIN_BRIGHTNESS || brightness > MAX_BRIGHTNESS {
@@ -43,7 +43,7 @@ impl Bulb {
         }
 
         println!("Brightness: {}", brightness);
-        rust_pigpio::pwm::hardware_pwm(PWM_PIN, PWM_FREQ, brightness);
+        rust_pigpio::pwm::hardware_pwm(PWM_PIN, PWM_FREQ, brightness).expect("Should be able to write to GPIO pins");
 
         self.current_brightness = brightness;
     }
@@ -75,7 +75,7 @@ impl Schedule {
         let start_time_seconds = self.hour*3600 + self.minute*60;
         let curr_time_seconds = current_time.hour()*3600 + current_time.minute()*60 + current_time.second();
 
-        let pct_progress = ((curr_time_seconds - start_time_seconds) as f64 / (self.duration * 60) as f64);
+        let pct_progress = curr_time_seconds as f64 - start_time_seconds as f64 / (self.duration * 60) as f64;
         let brightness = (MAX_BRIGHTNESS as f64 * pct_progress) as u32;
         brightness
     }
@@ -86,7 +86,7 @@ impl Schedule {
         let curr_time_seconds = current_time.hour()*3600 + current_time.minute()*60 + current_time.second();
         let end_time_seconds = start_time_seconds + self.duration*60;
 
-        (curr_time_seconds >= start_time_seconds && curr_time_seconds <= end_time_seconds)
+        curr_time_seconds >= start_time_seconds && curr_time_seconds <= end_time_seconds
     }
 
 }
@@ -111,11 +111,27 @@ fn set_brightness(con: &mut redis::Connection, brightness: u32) {
 
 
 fn main() {
-    rust_pigpio::initialize();
-    let mut bulb = Bulb::new();
-    let client = redis::Client::open("redis://127.0.0.1/").expect("Could not open client");
-    let mut con = client.get_connection().expect("Could not get connection");
+    let args: Vec<String> = env::args().collect();
+    let mut redis_host = String::from("redis://127.0.0.1/");
 
+    for arg in &args {
+        let parts: Vec<&str> = arg.split("=").collect();
+        if parts.len() != 2 {
+            continue;
+        }
+        if parts[0] == "--redis-host"{
+            redis_host = format!("redis://{}/", parts[1]);
+        }
+    }
+    println!("Initializing GPIO");
+    rust_pigpio::initialize().expect("Should be able to initialize GPIO");
+    let mut bulb = Bulb::new();
+
+    println!("Connecting to redis at {}", redis_host);
+    let client = redis::Client::open(redis_host).expect("Could not open client");
+    let mut con = client.get_connection().expect("Could not get connection");
+    
+    println!("Checking for data in redis");
     let mut target_brightness: u32 = con.get("brightness").unwrap_or(MAX_BRIGHTNESS);
     set_brightness(&mut con, target_brightness);
     
