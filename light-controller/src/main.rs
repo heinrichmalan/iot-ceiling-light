@@ -39,7 +39,11 @@ impl Bulb {
         if target_brightness > current_brightness {
             brightness = cmp::min(current_brightness + brightness_increase_allowed, target_brightness);
         } else if target_brightness < current_brightness {
-            brightness = cmp::max(current_brightness - brightness_increase_allowed, target_brightness);
+            if brightness_increase_allowed > current_brightness {
+                brightness = 0;
+            } else {
+                brightness = cmp::max(current_brightness - brightness_increase_allowed, target_brightness);
+            }
         }
 
         if brightness < MIN_BRIGHTNESS || brightness > MAX_BRIGHTNESS {
