@@ -18,6 +18,7 @@ static STATUS_OFF: &str = "0";
 
 struct Bulb {
     current_brightness: u32,
+    target_brightness: u32,
     current_status: String
 }
 
@@ -25,6 +26,7 @@ impl Bulb {
     fn new() -> Self {
         Self {
             current_brightness: 0,
+            target_brightness: 0,
             current_status: String::from("0")
         }
     }
@@ -73,7 +75,7 @@ impl MqttHandler {
         let mut mqtt_options = MqttOptions::new("test-pubsub1", "192.168.0.240", 1883);
         let sec_opts = SecurityOptions::UsernamePassword(String::from("mqttuser"), String::from("Kawaiinekodesuy0"));
         mqtt_options = mqtt_options.set_security_opts(sec_opts);
-        let (mqtt_client, notifications) = MqttClient::start(mqtt_options).unwrap();
+        let (mut mqtt_client, notifications) = MqttClient::start(mqtt_options).unwrap();
         mqtt_client.subscribe("bedroom/light/#", QoS::AtLeastOnce).unwrap();
         Self {
             mqtt_client,
@@ -81,45 +83,36 @@ impl MqttHandler {
         }
     }
 
-    fn check_notifications_for_topic(&self, to_match: &str) -> Option<String> {
-        let msg = self.notifications.try_recv();
+    fn check_notifications(&mut self, bulb: &mut Bulb) {
+        let mut msg = self.notifications.try_recv();
 
-        match msg {
-            Ok(n) => {
-                match n {
-                    Notification::Publish(pl) => {
-                        let topic: String = String::from(&pl.topic_name);
-                        let message: String = String::from(std::str::from_utf8(&pl.payload).unwrap());
-                        println!("topic: {:?} - msg: {:?}", &topic, &message);
-                        println!("To match: {}", to_match);
-                        if topic.as_str() == to_match {
-                            return Some(message);
-                        } else {
-                            return None
-                        }
-                    },
-                    _ => {
-                        return None
+        while msg.is_ok() {
+            let n = msg.unwrap();
+            match n {
+                Notification::Publish(pl) => {
+                    let topic: String = String::from(&pl.topic_name);
+                    let message: String = String::from(std::str::from_utf8(&pl.payload).unwrap());
+                    println!("topic: {:?} - msg: {:?}", &topic, &message);
+                    match topic.as_str() {
+                        "bedroom/light/switch" => {
+                            bulb.current_status = message;
+                            self.set_status(String::from(&bulb.current_status).as_str());
+                        },
+                        "bedroom/light/brightness/set" => {
+                            bulb.target_brightness = message.parse().expect("Should be an integer");
+                            self.set_brightness(bulb.target_brightness);
+                        },
+                        _ => {}
                     }
-                }
-            },
-            _ => {
-                return None
+                },
+                _ => {}
             }
+            msg = self.notifications.try_recv();
         }
-    }
-
-    
-    fn get_status(&self) -> Option<String> {
-        self.check_notifications_for_topic("bedroom/light/switch")
     }
     
     fn set_status(&mut self, status: &str) {
         self.mqtt_client.publish("bedroom/light/status", QoS::ExactlyOnce, false, status).unwrap();
-    }
-    
-    fn get_brightness(&self) -> Option<String> {
-        self.check_notifications_for_topic("bedroom/light/brightness/set")
     }
     
     fn set_brightness(&mut self, brightness: u32) {
@@ -179,28 +172,13 @@ fn main() {
     println!("Connecting to mqtt at {}", redis_host);
     let mut mqtt_handler = MqttHandler::new();
     
-    println!("Checking for data in mqtt");
-    let target_brightness: String = mqtt_handler.get_brightness().unwrap_or(MAX_BRIGHTNESS.to_string());
-    let mut target_brightness: u32 = target_brightness.parse().expect("Should be an integer");
-    mqtt_handler.set_brightness(target_brightness);
-    
-    let mut status: String = mqtt_handler.get_brightness().unwrap_or(String::from("1"));
-    mqtt_handler.set_status(&status);
-    bulb.current_status = String::clone(&status);
-    
     let mut schedule = Schedule::new(6, 30, 30);
 
     loop {
-        // println!("Status: {}, Brightness: {}", &status, target_brightness);
-        status = mqtt_handler.get_status().unwrap_or(String::from("0"));
+        mqtt_handler.check_notifications(&mut bulb);
 
-        if status != bulb.current_status {
-            bulb.current_status = String::clone(&status);
-            if bulb.current_status == "0" {
-                bulb.turn_off_bulb();
-            } else {
-                bulb.set_bulb_brightness(target_brightness);
-            }
+        if bulb.current_status == "0" {
+            bulb.turn_off_bulb();
         }
 
         if schedule.should_run() {
@@ -211,7 +189,7 @@ fn main() {
                 mqtt_handler.set_status(STATUS_ON);
                 mqtt_handler.set_brightness(0);
                 bulb.turn_off_bulb();
-            } else if status == "0" && schedule.running {
+            } else if bulb.current_status == "0" && schedule.running {
                 bulb.current_status = String::from("0");
                 mqtt_handler.set_status(STATUS_OFF);
                 bulb.turn_off_bulb();
@@ -219,17 +197,18 @@ fn main() {
             }
 
             if bulb.current_status == "1" && schedule.running {
-                mqtt_handler.set_brightness(cmp::min(MAX_BRIGHTNESS, schedule.calc_brightness()));
+                bulb.target_brightness = cmp::min(MAX_BRIGHTNESS, schedule.calc_brightness());
+                mqtt_handler.set_brightness(bulb.target_brightness);
             }
         } else if schedule.running {
             schedule.running = false;
         }
 
-        target_brightness = mqtt_handler.get_brightness().unwrap_or(String::from("0")).parse().expect("Should be an integer");
+        mqtt_handler.check_notifications(&mut bulb);
 
-        if bulb.current_brightness != target_brightness {
+        if bulb.current_brightness != bulb.target_brightness {
             if bulb.current_status != "0"{
-                bulb.set_bulb_brightness(target_brightness);
+                bulb.set_bulb_brightness(bulb.target_brightness);
             } else if bulb.current_status == "0" && bulb.current_brightness != 0 {
                 bulb.set_bulb_brightness(0);
             }
