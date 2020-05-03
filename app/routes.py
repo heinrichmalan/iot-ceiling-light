@@ -10,7 +10,7 @@ def index():
     return 'Hello, World!'
 
 def get_redis():
-    r = redis.Redis(host="localhost", port=6379, db=0, decode_responses=True)
+    r = redis.Redis(host="192.168.0.59", port=6379, db=0, decode_responses=True)
     return r
 
 def get_cache_value(key):
@@ -19,6 +19,7 @@ def get_cache_value(key):
 
 def set_cache_value(key, value):
     r = get_redis()
+    print(f"Setting cache - {key}:{value}")
     return r.set(key, value)
 
 @app.route('/api/lightStatus')
