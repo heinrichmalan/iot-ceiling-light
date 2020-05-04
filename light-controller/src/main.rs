@@ -181,19 +181,20 @@ fn main() {
     loop {
         mqtt_handler.check_notifications(&mut bulb);
 
-        if bulb.current_status == "0" {
+        if bulb.current_status == "0" && bulb.current_brightness != 0 {
             bulb.turn_off_bulb();
         }
 
         if schedule.should_run() {
-            println!("Run sched true");
             if bulb.current_status == "0" && !schedule.running {
+                println!("Starting to run Schedule");
                 schedule.running = true;
                 bulb.current_status = String::from("1");
                 mqtt_handler.set_status(STATUS_ON);
                 mqtt_handler.set_brightness(0);
                 bulb.turn_off_bulb();
             } else if bulb.current_status == "0" && schedule.running {
+                println!("Schedule cancelled by turning off light during schedule");
                 bulb.current_status = String::from("0");
                 mqtt_handler.set_status(STATUS_OFF);
                 bulb.turn_off_bulb();
